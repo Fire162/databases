@@ -528,6 +528,44 @@ async def test_transaction_commit(database_url):
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
+async def test_transaction_commit_error(database_url):
+    """
+    Ensure that when commit raises an error (such as deferred constraint check),
+    the transaction is rolled back and subsequent transactions succeed.
+    """
+    database_url_obj = DatabaseURL(database_url)
+    if database_url_obj.dialect != "sqlite":
+        pytest.skip(
+            "Test specifically covers SQLite deferred foreign key checks on commit."
+        )
+
+    async with Database(database_url) as database:
+        async with database.connection() as conn:
+            await conn.execute("PRAGMA foreign_keys = ON;")
+            await conn.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY);")
+            await conn.execute(
+                "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);"
+            )
+            try:
+                with pytest.raises(Exception):
+                    async with conn.transaction():
+                        await conn.execute(
+                            "INSERT INTO child (parent_id) VALUES (999);"
+                        )
+
+                # The connection should not be left in an open transaction; next transaction succeeds
+                async with conn.transaction():
+                    await conn.execute("INSERT INTO parent (id) VALUES (1);")
+
+                results = await conn.fetch_all("SELECT * FROM parent;")
+                assert len(results) == 1
+            finally:
+                await conn.execute("DROP TABLE child;")
+                await conn.execute("DROP TABLE parent;")
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
 async def test_transaction_context_child_task_inheritance(database_url):
     """
     Ensure that transactions are inherited by child tasks.
