@@ -1721,3 +1721,60 @@ async def test_mapping_property_interface(database_url):
         list_result = await database.fetch_all(query=query)
         assert list_result[0]._mapping["text"] == "example1"
         assert list_result[0]._mapping["completed"] is True
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_transaction_commit_error_pops_stack_and_exits(database_url):
+    """
+    Ensure that when transaction.commit() fails, the transaction is popped from the stack,
+    the connection exits, and the transaction backend is cleared.
+    """
+    async with Database(database_url) as database:
+        async with database.connection() as conn:
+            transaction = await conn.transaction()
+            with patch.object(
+                transaction._transaction,
+                "commit",
+                AsyncMock(side_effect=RuntimeError("Commit failed")),
+            ):
+                with pytest.raises(RuntimeError, match="Commit failed"):
+                    await transaction.commit()
+
+            assert len(conn._transaction_stack) == 0
+            assert transaction._transaction is None
+            assert conn._connection_counter == 1
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_transaction_commit_failure_cleans_up_state(database_url):
+    """
+    Ensure that if commit raises an error (e.g. SQLite deferred foreign key error),
+    the transaction is rolled back, the transaction stack is popped, the connection
+    is released, and subsequent transactions can proceed without lock errors.
+    """
+    if DatabaseURL(database_url).dialect != "sqlite":
+        return
+
+    async with Database(database_url) as database:
+        async with database.connection() as conn:
+            await conn.execute("PRAGMA foreign_keys = ON;")
+            await conn.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY);")
+            await conn.execute(
+                "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);"
+            )
+            try:
+                with pytest.raises(Exception):
+                    async with conn.transaction():
+                        await conn.execute("INSERT INTO child VALUES (1, 999);")
+
+                assert len(conn._transaction_stack) == 0
+                assert conn._connection_counter == 1
+
+                # Next transaction on the same connection should succeed
+                async with conn.transaction():
+                    await conn.execute("INSERT INTO parent VALUES (1);")
+            finally:
+                await conn.execute("DROP TABLE IF EXISTS child;")
+                await conn.execute("DROP TABLE IF EXISTS parent;")
