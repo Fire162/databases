@@ -867,6 +867,54 @@ async def test_transaction_commit_low_level(database_url):
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
+async def test_transaction_commit_failure(database_url):
+    """
+    Ensure that if commit raises an error, the transaction is rolled back,
+    the stack is cleaned up, and the connection remains usable.
+    """
+    async with Database(database_url) as database:
+        async with database.connection() as connection:
+            transaction = await connection.transaction()
+
+            async def failing_commit():
+                raise RuntimeError("commit failed")
+
+            transaction._transaction.commit = failing_commit
+
+            with pytest.raises(RuntimeError, match="commit failed"):
+                await transaction.commit()
+
+            assert not connection._transaction_stack
+
+            async with connection.transaction():
+                pass
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_transaction_context_commit_failure(database_url):
+    """
+    Ensure that if commit fails on exiting the context manager,
+    the transaction is rolled back and the connection remains usable.
+    """
+    async with Database(database_url) as database:
+        async with database.connection() as connection:
+
+            async def failing_commit():
+                raise RuntimeError("commit failed")
+
+            with pytest.raises(RuntimeError, match="commit failed"):
+                async with connection.transaction() as tx:
+                    tx._transaction.commit = failing_commit
+
+            assert not connection._transaction_stack
+
+            async with connection.transaction():
+                pass
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
 async def test_transaction_rollback_low_level(database_url):
     """
     Ensure that an explicit `await transaction.rollback()` is supported.
