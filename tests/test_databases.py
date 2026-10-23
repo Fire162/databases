@@ -844,6 +844,31 @@ async def test_transaction_rollback(database_url):
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
+async def test_transaction_commit_failure_cleans_up(database_url):
+    """
+    Ensure that a transaction whose commit fails is rolled back and cleaned up.
+    """
+    async with Database(database_url) as database:
+        async with database.connection() as connection:
+            transaction = await connection.transaction()
+            with patch.object(
+                transaction._transaction,
+                "commit",
+                side_effect=RuntimeError("commit failed"),
+            ):
+                with pytest.raises(RuntimeError, match="commit failed"):
+                    await transaction.commit()
+
+            assert len(connection._transaction_stack) == 0
+            assert transaction._transaction is None
+
+            query = notes.select()
+            results = await connection.fetch_all(query=query)
+            assert isinstance(results, list)
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
 async def test_transaction_commit_low_level(database_url):
     """
     Ensure that an explicit `await transaction.commit()` is supported.
