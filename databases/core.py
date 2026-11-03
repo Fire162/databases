@@ -425,7 +425,11 @@ class Transaction:
         if exc_type is not None or self._force_rollback:
             await self.rollback()
         else:
-            await self.commit()
+            try:
+                await self.commit()
+            except BaseException:
+                await self.rollback()
+                raise
 
     def __await__(self) -> typing.Generator[None, None, "Transaction"]:
         """
@@ -460,9 +464,9 @@ class Transaction:
     async def commit(self) -> None:
         async with self._connection._transaction_lock:
             assert self._connection._transaction_stack[-1] is self
-            self._connection._transaction_stack.pop()
             assert self._transaction is not None
             await self._transaction.commit()
+            self._connection._transaction_stack.pop()
             await self._connection.__aexit__()
             self._transaction = None
 

@@ -891,6 +891,63 @@ async def test_transaction_rollback_low_level(database_url):
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
+async def test_transaction_commit_error(database_url):
+    """
+    Ensure that when transaction.commit() fails, the transaction is rolled back
+    and stack / connection state remains consistent.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            conn = database.connection()
+            tx_backend_cls = type(conn._connection.transaction())
+            with patch.object(
+                tx_backend_cls,
+                "commit",
+                new=AsyncMock(side_effect=RuntimeError("Commit failed")),
+            ):
+                with pytest.raises(RuntimeError):
+                    async with database.transaction():
+                        query = notes.insert().values(text="example1", completed=True)
+                        await database.execute(query)
+
+            async with database.transaction():
+                query = notes.select()
+                results = await database.fetch_all(query=query)
+                assert len(results) == 0
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_transaction_commit_error_low_level(database_url):
+    """
+    Ensure that when low-level transaction.commit() fails, the transaction
+    can be rolled back cleanly.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            conn = database.connection()
+            transaction = await database.transaction()
+            tx_backend_cls = type(conn._connection.transaction())
+            with patch.object(
+                tx_backend_cls,
+                "commit",
+                new=AsyncMock(side_effect=RuntimeError("Commit failed")),
+            ):
+                query = notes.insert().values(text="example1", completed=True)
+                await database.execute(query)
+                with pytest.raises(RuntimeError):
+                    await transaction.commit()
+
+                await transaction.rollback()
+
+            async with database.transaction():
+                query = notes.select()
+                results = await database.fetch_all(query=query)
+                assert len(results) == 0
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
 async def test_transaction_decorator(database_url):
     """
     Ensure that @database.transaction() is supported.
