@@ -891,6 +891,57 @@ async def test_transaction_rollback_low_level(database_url):
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
+async def test_transaction_commit_error_cleanup(database_url):
+    """
+    Ensure that if commit raises an exception, the transaction is rolled back,
+    the transaction stack is popped, and subsequent queries work.
+    """
+    async with Database(database_url) as database:
+        async with database.connection() as connection:
+            transaction = await connection.transaction()
+            query = notes.insert().values(text="example1", completed=True)
+            await connection.execute(query)
+
+            async def failing_commit():
+                raise RuntimeError("simulated commit failure")
+
+            transaction._transaction.commit = failing_commit
+            with pytest.raises(RuntimeError, match="simulated commit failure"):
+                await transaction.commit()
+
+            assert len(connection._transaction_stack) == 0
+            assert transaction._transaction is None
+
+            results = await connection.fetch_all(query=notes.select())
+            assert len(results) == 0
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_transaction_context_manager_commit_error(database_url):
+    """
+    Ensure that when commit fails at exit of a transaction context manager,
+    the transaction is rolled back and the stack is cleaned up.
+    """
+    async with Database(database_url) as database:
+        async with database.connection() as connection:
+            with pytest.raises(RuntimeError, match="simulated commit failure"):
+                async with connection.transaction() as transaction:
+                    query = notes.insert().values(text="example1", completed=True)
+                    await connection.execute(query)
+
+                    async def failing_commit():
+                        raise RuntimeError("simulated commit failure")
+
+                    transaction._transaction.commit = failing_commit
+
+            assert len(connection._transaction_stack) == 0
+            results = await connection.fetch_all(query=notes.select())
+            assert len(results) == 0
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
 async def test_transaction_decorator(database_url):
     """
     Ensure that @database.transaction() is supported.
